@@ -137,16 +137,95 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// POST 接口：errorAi - 错误接收接口
-app.post("/errorAi", (req, res) => {
+// POST 接口：errorAi - 错误接收接口，使用 AI 分析错误信息
+app.post("/errorAi", async (req, res) => {
   try {
     const { errors, timestamp } = req.body;
 
-    // 原样返回 errors 和 timestamp
+    if (!errors) {
+      return res.status(400).json({
+        message: "请提供 errors 参数",
+      });
+    }
+
+    // 将 errors 转换为 JSON 字符串，方便 AI 理解
+    const errorsJsonString = JSON.stringify(errors, null, 2);
+
+    // 构造系统消息，明确要求 AI 返回固定格式的 JSON
+    const systemPrompt = `你是一个专业的代码错误分析助手。你的任务是分析接收到的错误信息（JSON 格式），并返回固定格式的 JSON 数据。
+
+请严格按照以下 JSON 格式返回分析结果，不要添加任何额外的文字说明：
+
+{
+  "errorCount": 错误总数（数字）,
+  "errorLevel": "error|warning|info"（最高错误级别）,
+  "summary": "错误的简要总结（一句话，使用中文）",
+  "errors": [
+    {
+      "type": "错误类型（如：SyntaxError、TypeError、ReferenceError等）",
+      "message": "错误消息",
+      "location": "错误位置（文件路径和行号，如果有，使用中文）",
+      "severity": "high|medium|low"（严重程度）,
+      "suggestions": ["修改建议1（使用中文）", "修改建议2（使用中文）", "修改建议3（使用中文）"]
+    }
+  ]
+}
+
+要求：
+1. 只返回 JSON 格式数据，不要包含任何 markdown 代码块标记（如 \`\`\`json）
+2. 确保返回的是有效的 JSON 格式
+3. 如果 errors 是数组，分析每个错误；如果是对象，分析整个错误对象
+4. 根据错误的严重程度和类型，提供具体可行的修改建议
+5. 所有文本内容（summary、suggestions）必须使用中文回答`;
+
+    // 构造用户消息，包含实际的错误信息
+    const userPrompt = `请分析以下错误信息：
+
+${errorsJsonString}
+
+请返回固定格式的 JSON 分析结果。注意：所有文本内容（summary、suggestions）必须使用中文回答。`;
+
+    // 构建消息列表
+    const messages = [
+      new SystemMessage(systemPrompt),
+      new HumanMessage(userPrompt),
+    ];
+
+    // 调用 AI 分析错误
+    const aiResponse = await llm.invoke(messages);
+    let analysisResult;
+
+    // 尝试解析 AI 返回的 JSON
+    try {
+      // 移除可能的 markdown 代码块标记
+      let responseContent = aiResponse.content.trim();
+
+      // 解析 JSON
+      analysisResult = JSON.parse(responseContent);
+    } catch (parseError) {
+      console.error("AI 返回的 JSON 解析失败:", parseError);
+      console.error("AI 原始返回:", aiResponse.content);
+      // 如果解析失败，返回一个默认的分析结果
+      analysisResult = {
+        errorCount: Array.isArray(errors) ? errors.length : 1,
+        errorLevel: "error",
+        summary: "无法解析错误信息，请检查错误格式",
+        errors: [
+          {
+            type: "ParseError",
+            message: "AI 返回的 JSON 格式不正确",
+            location: "未知",
+            severity: "medium",
+            suggestions: ["检查 AI 返回的原始内容", "确保错误信息格式正确"],
+          },
+        ],
+      };
+    }
+
+    // 返回固定格式的响应
     res.json({
       message: "success",
-      errors: errors,
-      timestamp: timestamp,
+      analysis: analysisResult,
     });
   } catch (error) {
     console.error("errorAi 接口错误:", error);
