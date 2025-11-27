@@ -5,7 +5,9 @@ const {
   SystemMessage,
   AIMessage,
 } = require("@langchain/core/messages");
+const { StructuredOutputParser } = require("@langchain/core/output_parsers");
 const cors = require("cors");
+const { z } = require("zod");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,7 +18,7 @@ const conversationHistory = new Map();
 
 // 模型名称
 // const MODEL_NAME = "qwen3:0.6b";
-const MODEL_NAME = "llama3";
+const MODEL_NAME = "llama3.2";
 
 // 初始化 LangChain Ollama 客户端，连接到本地部署的 Ollama（端口 11434）
 const llm = new ChatOllama({
@@ -137,10 +139,34 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// POST 接口：errorAi - 错误接收接口，使用 AI 分析错误信息
+// 定义错误分析的 Zod Schema（用于结构化输出）
+const errorAnalysisSchema = z.object({
+  errorCount: z.number().describe("错误总数"),
+  errorLevel: z
+    .enum(["error", "warning", "info"])
+    .describe("最高错误级别"),
+  summary: z.string().describe("错误的简要总结，一句话，使用中文"),
+  errors: z.array(
+    z.object({
+      type: z
+        .string()
+        .describe("错误类型，如：SyntaxError、TypeError、ReferenceError等"),
+      message: z.string().describe("错误消息"),
+      location: z.string().describe("错误位置，文件路径和行号，如果有"),
+      severity: z
+        .enum(["high", "medium", "low"])
+        .describe("严重程度"),
+      suggestions: z
+        .array(z.string())
+        .describe("修改建议列表，使用中文，至少提供2-3条建议"),
+    })
+  ),
+});
+
+// POST 接口：errorAi - 错误接收接口，使用 AI 分析错误信息（使用结构化输出）
 app.post("/errorAi", async (req, res) => {
   try {
-    const { errors, timestamp } = req.body;
+    const { errors } = req.body;
 
     if (!errors) {
       return res.status(400).json({
@@ -149,6 +175,144 @@ app.post("/errorAi", async (req, res) => {
     }
 
     // 将 errors 转换为 JSON 字符串，方便 AI 理解
+    const errorsJsonString = JSON.stringify(errors, null, 2);
+
+    // 方法一：使用 .withStructuredOutput() 强制结构化输出（推荐）
+    // 创建一个支持结构化输出的 LLM 实例
+    const structuredLlm = llm.withStructuredOutput(errorAnalysisSchema, {
+      name: "error_analysis", // 工具名称
+    });
+
+    // 构造系统消息
+    const systemPrompt = `你是一个专业的代码错误分析助手。你的任务是分析接收到的错误信息并返回结构化的分析结果。
+
+要求：
+1. 如果 errors 是数组，分析每个错误；如果是对象，分析整个错误对象
+2. 根据错误的严重程度和类型，提供具体可行的修改建议
+3. 所有文本内容（summary、suggestions、location）必须使用中文回答
+4. 对于每个错误，至少提供2-3条具体的修复建议`;
+
+    // 构造用户消息
+    const userPrompt = `请分析以下错误信息：
+
+${errorsJsonString}
+
+请返回结构化的错误分析结果。`;
+
+    // 构建消息列表
+    const messages = [
+      new SystemMessage(systemPrompt),
+      new HumanMessage(userPrompt),
+    ];
+
+    // 调用 AI 分析错误 - 自动返回结构化的对象，无需手动解析 JSON
+    const analysisResult = await structuredLlm.invoke(messages);
+
+    // 返回固定格式的响应
+    res.json({
+      message: "success",
+      analysis: analysisResult,
+      method: "withStructuredOutput", // 标记使用的方法
+    });
+  } catch (error) {
+    console.error("errorAi 接口错误:", error);
+    console.error("错误详情:", error.message);
+    
+    // 如果结构化输出失败，返回友好的错误信息
+    res.status(500).json({
+      message: "请求失败",
+      error: error.message,
+      hint: "当前模型可能不支持结构化输出。请尝试使用支持函数调用的模型（如 llama3.1 或更高版本）",
+    });
+  }
+});
+
+// POST 接口：errorAi-parser - 使用 StructuredOutputParser 的备用方法（兼容更多模型）
+app.post("/errorAi-parser", async (req, res) => {
+  try {
+    const { errors } = req.body;
+
+    if (!errors) {
+      return res.status(400).json({
+        message: "请提供 errors 参数",
+      });
+    }
+
+    // 方法二：使用 StructuredOutputParser（更通用，兼容更多模型）
+    // 创建输出解析器
+    const parser = StructuredOutputParser.fromZodSchema(errorAnalysisSchema);
+
+    // 获取格式化指令
+    const formatInstructions = parser.getFormatInstructions();
+
+    console.log("格式化指令:", formatInstructions);
+
+    // 将 errors 转换为 JSON 字符串
+    const errorsJsonString = JSON.stringify(errors, null, 2);
+
+    // 构造提示词，包含格式化指令
+    const systemPrompt = `你是一个专业的代码错误分析助手。你的任务是分析接收到的错误信息并返回结构化的分析结果。
+
+要求：
+1. 如果 errors 是数组，分析每个错误；如果是对象，分析整个错误对象
+2. 根据错误的严重程度和类型，提供具体可行的修改建议
+3. 所有文本内容（summary、suggestions、location）必须使用中文回答
+4. 对于每个错误，至少提供2-3条具体的修复建议
+
+${formatInstructions}`;
+
+    const userPrompt = `请分析以下错误信息：
+
+${errorsJsonString}`;
+
+    // 构建消息
+    const messages = [
+      new SystemMessage(systemPrompt),
+      new HumanMessage(userPrompt),
+    ];
+
+
+    // 调用 AI
+    const response = await llm.invoke(messages);
+
+    console.log("AI 原始返回:", response.content);
+
+    // 使用 parser 解析响应
+    const analysisResult = await parser.parse(response.content);
+
+    console.log("解析后的结构化结果:", JSON.stringify(analysisResult, null, 2));
+
+    // 返回固定格式的响应
+    res.json({
+      message: "success",
+      analysis: analysisResult,
+      method: "StructuredOutputParser", // 标记使用的方法
+    });
+  } catch (error) {
+    console.error("errorAi-parser 接口错误:", error);
+    console.error("错误详情:", error.message);
+    
+    res.status(500).json({
+      message: "请求失败",
+      error: error.message,
+      hint: "解析失败，AI 可能没有按照要求的格式返回数据",
+    });
+  }
+});
+
+// POST 接口：errorAi-json - 使用 JSON Mode 的方法（需要模型支持）
+app.post("/errorAi-json", async (req, res) => {
+  try {
+    const { errors } = req.body;
+
+    if (!errors) {
+      return res.status(400).json({
+        message: "请提供 errors 参数",
+      });
+    }
+
+
+    // 将 errors 转换为 JSON 字符串
     const errorsJsonString = JSON.stringify(errors, null, 2);
 
     // 构造系统消息，明确要求 AI 返回固定格式的 JSON
@@ -193,45 +357,23 @@ ${errorsJsonString}
 
     // 调用 AI 分析错误
     const aiResponse = await llm.invoke(messages);
-    let analysisResult;
 
-    // 尝试解析 AI 返回的 JSON
-    try {
-      // 移除可能的 markdown 代码块标记
-      let responseContent = aiResponse.content.trim();
-
-      // 解析 JSON
-      analysisResult = JSON.parse(responseContent);
-    } catch (parseError) {
-      console.error("AI 返回的 JSON 解析失败:", parseError);
-      console.error("AI 原始返回:", aiResponse.content);
-      // 如果解析失败，返回一个默认的分析结果
-      analysisResult = {
-        errorCount: Array.isArray(errors) ? errors.length : 1,
-        errorLevel: "error",
-        summary: "无法解析错误信息，请检查错误格式",
-        errors: [
-          {
-            type: "ParseError",
-            message: "AI 返回的 JSON 格式不正确",
-            location: "未知",
-            severity: "medium",
-            suggestions: ["检查 AI 返回的原始内容", "确保错误信息格式正确"],
-          },
-        ],
-      };
-    }
+    // 解析 JSON
+    const analysisResult = JSON.parse(aiResponse.content.trim());
+    console.log('🚀🚀🚀🚀', aiResponse.content);
 
     // 返回固定格式的响应
     res.json({
       message: "success",
       analysis: analysisResult,
+      originaimsg: aiResponse.content,
     });
   } catch (error) {
-    console.error("errorAi 接口错误:", error);
+    console.error("errorAi-json 接口错误:", error);
     res.status(500).json({
       message: "请求失败",
       error: error.message,
+      hint: "当前模型可能不支持 JSON 模式。请尝试使用 llama3.1 或更高版本的模型",
     });
   }
 });

@@ -11,6 +11,10 @@
 - ✅ 与 Ollama 模型对话接口
 - ✅ **上下文记忆功能**：支持多会话对话，模型可以记住对话历史
 - ✅ 会话管理：支持清除和查询会话历史
+- ✅ **结构化输出**：三种方法强制 AI 返回 JSON 格式数据
+  - 方法一：`withStructuredOutput()` - 最推荐
+  - 方法二：`StructuredOutputParser` - 最通用
+  - 方法三：`JSON Mode` - 原生支持
 
 ## 前置要求
 
@@ -186,6 +190,89 @@ node-ollama/
 └── .gitignore         # Git 忽略文件
 ```
 
+### 6. POST /errorAi - AI 错误分析（方法一：withStructuredOutput）⭐推荐
+
+使用 LangChain 的 `withStructuredOutput()` 强制返回结构化 JSON 数据。
+
+**请求示例：**
+
+```bash
+curl -X POST http://localhost:3000/errorAi \
+  -H "Content-Type: application/json" \
+  -d '{
+    "errors": {
+      "type": "TypeError",
+      "message": "Cannot read property of undefined",
+      "stack": "at App.jsx:45:12"
+    }
+  }'
+```
+
+**响应示例：**
+
+```json
+{
+  "message": "success",
+  "method": "withStructuredOutput",
+  "analysis": {
+    "errorCount": 1,
+    "errorLevel": "error",
+    "summary": "代码尝试访问未定义对象的属性",
+    "errors": [
+      {
+        "type": "TypeError",
+        "message": "Cannot read property of undefined",
+        "location": "App.jsx:45:12",
+        "severity": "high",
+        "suggestions": [
+          "检查对象是否已正确初始化",
+          "使用可选链操作符 (?.) 避免访问未定义属性",
+          "添加条件判断确保对象存在后再访问属性"
+        ]
+      }
+    ]
+  }
+}
+```
+
+### 7. POST /errorAi-parser - AI 错误分析（方法二：StructuredOutputParser）
+
+使用 StructuredOutputParser，兼容更多模型。
+
+**请求示例：**
+
+```bash
+curl -X POST http://localhost:3000/errorAi-parser \
+  -H "Content-Type: application/json" \
+  -d '{
+    "errors": {
+      "type": "ReferenceError",
+      "message": "myFunction is not defined"
+    }
+  }'
+```
+
+### 8. POST /errorAi-json - AI 错误分析（方法三：JSON Mode）
+
+使用模型原生 JSON 模式（需要模型支持）。
+
+**请求示例：**
+
+```bash
+curl -X POST http://localhost:3000/errorAi-json \
+  -H "Content-Type: application/json" \
+  -d '{
+    "errors": {
+      "type": "SyntaxError",
+      "message": "Unexpected token"
+    }
+  }'
+```
+
+**注意：** 详细的使用说明和方法对比，请查看 [STRUCTURED_OUTPUT.md](./STRUCTURED_OUTPUT.md)
+
+---
+
 ## 注意事项
 
 - 确保 Ollama 服务在运行，否则 `/test-ollama` 和 `/chat` 接口会失败
@@ -195,6 +282,10 @@ node-ollama/
 - **上下文记忆**：每个会话（sessionId）独立维护对话历史，最多保留最近 20 轮对话（40 条消息）
 - **会话管理**：如果不指定 `sessionId`，默认使用 `"default"` 会话
 - **内存存储**：会话历史存储在内存中，服务器重启后会丢失。如需持久化，可以考虑使用数据库
+- **结构化输出**：
+  - 方法一（`/errorAi`）需要模型支持函数调用（推荐 llama3.1+）
+  - 方法二（`/errorAi-parser`）兼容所有模型
+  - 方法三（`/errorAi-json`）需要模型支持 JSON 模式
 
 ## 故障排查
 
